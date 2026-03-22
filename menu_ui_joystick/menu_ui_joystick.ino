@@ -8,6 +8,9 @@ U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 #define JOY_SW   D5   // joystick click = select
 // VRX not used (ESP8266 has only 1 analog input)
 
+// --- Select button ---
+#define BTN_SEL_EXT D4  // external select button (also onboard LED)
+
 // --- Back button (D3) ---
 #define BTN_BACK D3   // short press = back, long press = ctrl
 
@@ -28,9 +31,13 @@ const unsigned long JOY_REPEAT_RATE  = 150;  // ms between repeats
 int joyHeldDir = 0;  // -1=up, 1=down, 0=center
 unsigned long joyHeldSince = 0;
 
-// SW debounce
+// SW debounce (joystick click)
 bool lastSW = HIGH;
 unsigned long lastSWTime = 0;
+
+// External select button debounce
+bool lastSelExt = HIGH;
+unsigned long lastSelExtTime = 0;
 
 // Back button: short/long press
 bool lastBack = HIGH;
@@ -76,6 +83,14 @@ void readInputs() {
     lastSWTime = millis();
   }
   lastSW = sw;
+
+  // --- External select button (D4) ---
+  bool selExt = digitalRead(BTN_SEL_EXT);
+  if (selExt == LOW && lastSelExt == HIGH && millis() - lastSelExtTime > DEBOUNCE) {
+    btn[B_SEL] = true;
+    lastSelExtTime = millis();
+  }
+  lastSelExt = selExt;
 
   // --- Back button: short = back, long hold = ctrl ---
   bool back = digitalRead(BTN_BACK);
@@ -234,7 +249,7 @@ void drawAbout() {
   u8g2.setFont(u8g2_font_ncenB08_tr);
   u8g2.drawStr(8, 30, "ESP8266 Menu UI");
   u8g2.drawStr(8, 44, "SH1106 128x64");
-  u8g2.drawStr(8, 58, "Joystick + Button");
+  u8g2.drawStr(8, 58, "Joystick+2 Buttons");
 }
 
 // --- Input handling ---
@@ -295,6 +310,7 @@ void handleAbout() {
 
 void setup() {
   pinMode(JOY_SW, INPUT_PULLUP);
+  pinMode(BTN_SEL_EXT, INPUT_PULLUP);
   pinMode(BTN_BACK, INPUT_PULLUP);
 
   Wire.begin(D2, D1);
