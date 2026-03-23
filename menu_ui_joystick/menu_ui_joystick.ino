@@ -3,8 +3,20 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <EEPROM.h>
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+// --- EEPROM Settings ---
+#define EEPROM_MAGIC 0x82660001
+struct Settings {
+  uint32_t magic;
+  bool lightOn;
+  bool fanOn;
+  int brightness;
+  int timerIndex;
+  bool invertDisplay;
+};
 
 // --- WiFi ---
 const char* WIFI_SSID = "x70";
@@ -181,6 +193,18 @@ void saveStateSnapshot() {
   prevBrightness = brightness;
   prevTimerIndex = timerIndex;
   prevInvertDisplay = invertDisplay;
+
+  // Save to EEPROM
+  Settings s = {
+    EEPROM_MAGIC,
+    lightOn,
+    fanOn,
+    brightness,
+    timerIndex,
+    invertDisplay
+  };
+  EEPROM.put(0, s);
+  EEPROM.commit();
 }
 
 void sendStateToServer() {
@@ -450,7 +474,25 @@ void setup() {
 
   Wire.begin(D2, D1);
   u8g2.begin();
+
+  // Load EEPROM Settings
+  EEPROM.begin(sizeof(Settings));
+  Settings s;
+  EEPROM.get(0, s);
+  if (s.magic == EEPROM_MAGIC) {
+    lightOn = s.lightOn;
+    fanOn = s.fanOn;
+    brightness = s.brightness;
+    timerIndex = s.timerIndex;
+    invertDisplay = s.invertDisplay;
+  }
+  
   u8g2.setContrast(brightness);
+  if (invertDisplay) u8g2.sendF("c", 0xA7);
+  
+  // Initialize sync state so it sends the initial loaded state up to the server
+  saveStateSnapshot();
+
   lastActivityTime = millis();
 
   // Start WiFi connection (non-blocking)

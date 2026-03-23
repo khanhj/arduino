@@ -31,8 +31,18 @@ class DeviceState(BaseModel):
     wifi_rssi: Optional[int] = None
     last_update: Optional[str] = None
 
+STATE_FILE = Path(__file__).parent / "state.json"
+
 # Current state in memory
 current_state = DeviceState()
+
+# Load persisted state if exists
+if STATE_FILE.exists():
+    try:
+        data = json.loads(STATE_FILE.read_text())
+        current_state = DeviceState(**data)
+    except Exception as e:
+        print(f"Error loading state.json: {e}")
 
 # --- WebSocket manager ---
 
@@ -66,6 +76,13 @@ async def update_state(state: DeviceState):
     global current_state
     state.last_update = datetime.now().isoformat()
     current_state = state
+    
+    # Persist to disk
+    try:
+        STATE_FILE.write_text(current_state.model_dump_json(indent=2))
+    except Exception as e:
+        print(f"Error saving state.json: {e}")
+        
     await manager.broadcast(state.model_dump())
     return {"status": "ok"}
 
