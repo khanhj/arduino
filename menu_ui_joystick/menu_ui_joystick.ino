@@ -3,20 +3,8 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <EEPROM.h>
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
-
-// --- EEPROM Settings ---
-#define EEPROM_MAGIC 0x82660002
-struct Settings {
-  uint32_t magic;
-  bool lightOn;
-  bool fanOn;
-  int brightness;
-  int timerIndex;
-  bool invertDisplay;
-};
 
 // --- WiFi ---
 const char* WIFI_SSID = "x70";
@@ -157,17 +145,8 @@ bool prevFanOn = false;
 int prevBrightness = 255;
 int prevTimerIndex = 0;
 bool prevInvertDisplay = false;
-
-// --- Network Sync ---
 unsigned long lastSyncTime = 0;
-const unsigned long SYNC_INTERVAL = 15000;  // 15s to keep TLS connection alive
-bool pendingSync = false;
-const unsigned long SYNC_DEBOUNCE_MS = 1000;
-
-// Persistent connection to skip slow TLS handshakes
-WiFiClientSecure secureClient;
-HTTPClient http;
-bool httpInitialized = false;
+const unsigned long SYNC_INTERVAL = 5000;  // periodic sync every 5s
 
 enum Screen { MAIN_MENU, HOME, LIGHT, FAN, SETTINGS, SET_BRIGHT, SET_TIMER, SET_INVERT, ABOUT };
 Screen screen = MAIN_MENU;
@@ -196,7 +175,7 @@ bool stateChanged() {
          invertDisplay != prevInvertDisplay;
 }
 
-void syncPrevState() {
+void saveStateSnapshot() {
   prevLightOn = lightOn;
   prevFanOn = fanOn;
   prevBrightness = brightness;
@@ -204,40 +183,18 @@ void syncPrevState() {
   prevInvertDisplay = invertDisplay;
 }
 
-void saveStateSnapshot() {
-  syncPrevState();
+void sendStateToServer() {
+  if (WiFi.status() != WL_CONNECTED) return;
 
-  Settings s = {
-    EEPROM_MAGIC,
-    lightOn,
-    fanOn,
-    brightness,
-    timerIndex,
-    invertDisplay
-  };
-  EEPROM.put(0, s);
-  EEPROM.commit();
-}
+  WiFiClientSecure client;
+  client.setInsecure();  // skip cert verification for tailscale
+  HTTPClient http;
+  http.setTimeout(3000);
 
-bool sendStateToServer() {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  // Indicate freezing to the user
-  u8g2.setFont(u8g2_font_ncenB08_tr);
-  u8g2.drawStr(100, 62, "Sync");
-  u8g2.sendBuffer();
-
-  if (!httpInitialized) {
-    secureClient.setInsecure();
-    secureClient.setBufferSizes(512, 512); // Save memory
-    http.setReuse(true); // Keep-Alive to bypass slow 5-sec TLS handshakes!
-    http.setTimeout(8000);
-    http.begin(secureClient, SERVER_URL);
+  if (http.begin(client, SERVER_URL)) {
     http.addHeader("Content-Type", "application/json");
-    httpInitialized = true;
-  }
 
-  char json[256];
+    char json[256];
     snprintf(json, sizeof(json),
       "{\"light\":%s,\"fan\":%s,\"brightness\":%d,"
       "\"timer_index\":%d,\"timer_label\":\"%s\","
@@ -252,18 +209,10 @@ bool sendStateToServer() {
       WiFi.RSSI()
     );
 
-    int res = http.POST(json);
-  
-  if (res > 0) {
+    http.POST(json);
+    http.end();
     saveStateSnapshot();
     lastSyncTime = millis();
-    return true;
-  } else {
-    // If Keep-Alive dropped violently, reset HTTP connection
-    http.end();
-    httpInitialized = false;
-    lastSyncTime = millis();
-    return false;
   }
 }
 
@@ -501,24 +450,7 @@ void setup() {
 
   Wire.begin(D2, D1);
   u8g2.begin();
-
-  // Load EEPROM
-  EEPROM.begin(sizeof(Settings));
-  Settings s;
-  EEPROM.get(0, s);
-  if (s.magic == EEPROM_MAGIC) {
-    if (s.brightness >= 0 && s.brightness <= 255) brightness = s.brightness;
-    if (s.timerIndex >= 0 && s.timerIndex < timerCount) timerIndex = s.timerIndex;
-    lightOn = s.lightOn;
-    fanOn = s.fanOn;
-    invertDisplay = s.invertDisplay;
-  }
-
   u8g2.setContrast(brightness);
-  if (invertDisplay) u8g2.sendF("c", 0xA7);
-
-  syncPrevState(); // So stateChanged gets evaluated properly
-  pendingSync = true;
   lastActivityTime = millis();
 
   // Start WiFi connection (non-blocking)
@@ -546,25 +478,33 @@ void loop() {
     }
   }
 
-  // --- NETWORK SYNC ---
-  if (stateChanged()) pendingSync = true;
-  
-  if (pendingSync && (millis() - lastActivityTime >= SYNC_DEBOUNCE_MS)) {
-    sendStateToServer();
-    pendingSync = false; // ALWAYS clear regardless of success to prevent UI freezing deadloops!
-  } else if (!pendingSync && millis() - lastSyncTime >= SYNC_INTERVAL) {
+  if (screenOff) return;
+
+  switch (screen) {
+    case MAIN_MENU:  handleMainMenu(); break;
+    case HOME:       handleHome(); break;
+    case LIGHT:      handleLight(); break;
+    case FAN:        handleFan(); break;
+    case SETTINGS:   handleSettings(); break;
+    case SET_BRIGHT: handleBrightness(); break;
+    case SET_TIMER:  handleScreenTimer(); break;
+    case SET_INVERT: handleInvertColor(); break;
+    case ABOUT:      handleAbout(); break;
+  }
+
+  // Send state to server on change or periodically
+  if (stateChanged() || millis() - lastSyncTime >= SYNC_INTERVAL) {
     sendStateToServer();
   }
 
+  // WiFi auto-reconnect
   if (WiFi.status() != WL_CONNECTED) {
     static unsigned long lastReconnect = 0;
-    if (millis() - lastReconnect > 30000) {
+    if (millis() - lastReconnect > 10000) {
       wifiConnect();
       lastReconnect = millis();
     }
   }
-
-  if (screenOff) return; // Halt UI rendering if off
 
   u8g2.clearBuffer();
   switch (screen) {
