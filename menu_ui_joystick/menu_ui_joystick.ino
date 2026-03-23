@@ -157,8 +157,15 @@ bool prevFanOn = false;
 int prevBrightness = 255;
 int prevTimerIndex = 0;
 bool prevInvertDisplay = false;
+
 unsigned long lastSyncTime = 0;
-const unsigned long SYNC_INTERVAL = 5000;  // periodic sync every 5s
+const unsigned long SYNC_INTERVAL = 60000;  // periodic sync every 60s (was 5s)
+
+// --- Debounced Sync ---
+bool pendingSync = false;
+unsigned long lastStateChangeTime = 0;
+const unsigned long SYNC_DEBOUNCE_MS = 1000;  // wait 1s after last input
+
 
 enum Screen { MAIN_MENU, HOME, LIGHT, FAN, SETTINGS, SET_BRIGHT, SET_TIMER, SET_INVERT, ABOUT };
 Screen screen = MAIN_MENU;
@@ -534,9 +541,20 @@ void loop() {
     case ABOUT:      handleAbout(); break;
   }
 
-  // Send state to server on change or periodically
-  if (stateChanged() || millis() - lastSyncTime >= SYNC_INTERVAL) {
+  // Flag for debounced sync if state changed
+  if (stateChanged()) {
+    pendingSync = true;
+    lastStateChangeTime = millis();
+  }
+
+  // Send state to server only after no inputs for 1 second, or periodically every 60s
+  if (pendingSync && (millis() - lastStateChangeTime >= SYNC_DEBOUNCE_MS)) {
     sendStateToServer();
+    pendingSync = false;
+    lastSyncTime = millis();
+  } else if (!pendingSync && millis() - lastSyncTime >= SYNC_INTERVAL) {
+    sendStateToServer();
+    lastSyncTime = millis();
   }
 
   // WiFi auto-reconnect
