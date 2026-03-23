@@ -1,7 +1,15 @@
 #include <Wire.h>
 #include <U8g2lib.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+// --- WiFi ---
+const char* WIFI_SSID = "x70";
+const char* WIFI_PASS = "244466666";
+const char* SERVER_URL = "https://8x8.tail73f41e.ts.net/api/state";
 
 // --- Joystick ---
 #define JOY_VRY  A0   // up/down axis
@@ -121,7 +129,6 @@ bool fanOn = false;
 int brightness = 255;
 
 // --- Screen auto-off timer ---
-// timerIndex: 0=Off, 1=10s, 2=30s, 3=1m, 4=5m
 int timerIndex = 0;
 const unsigned long timerValues[] = {0, 10000, 30000, 60000, 300000};
 const char *timerLabels[] = {"Off", "10s", "30s", "1 min", "5 min"};
@@ -131,6 +138,15 @@ bool screenOff = false;
 
 // --- Invert display ---
 bool invertDisplay = false;
+
+// --- State tracking for server sync ---
+bool prevLightOn = false;
+bool prevFanOn = false;
+int prevBrightness = 255;
+int prevTimerIndex = 0;
+bool prevInvertDisplay = false;
+unsigned long lastSyncTime = 0;
+const unsigned long SYNC_INTERVAL = 5000;  // periodic sync every 5s
 
 enum Screen { MAIN_MENU, HOME, LIGHT, FAN, SETTINGS, SET_BRIGHT, SET_TIMER, SET_INVERT, ABOUT };
 Screen screen = MAIN_MENU;
@@ -142,6 +158,63 @@ const char *mainItems[] = {"Home", "Light", "Fan", "Settings", "About"};
 const int mainCount = 5;
 const char *setItems[] = {"Brightness", "Screen Timer", "Invert Color", "Back"};
 const int setCount = 4;
+
+// --- WiFi helpers ---
+
+void wifiConnect() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  // Non-blocking — we check WiFi.status() in loop
+}
+
+bool stateChanged() {
+  return lightOn != prevLightOn ||
+         fanOn != prevFanOn ||
+         brightness != prevBrightness ||
+         timerIndex != prevTimerIndex ||
+         invertDisplay != prevInvertDisplay;
+}
+
+void saveStateSnapshot() {
+  prevLightOn = lightOn;
+  prevFanOn = fanOn;
+  prevBrightness = brightness;
+  prevTimerIndex = timerIndex;
+  prevInvertDisplay = invertDisplay;
+}
+
+void sendStateToServer() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClientSecure client;
+  client.setInsecure();  // skip cert verification for tailscale
+  HTTPClient http;
+  http.setTimeout(3000);
+
+  if (http.begin(client, SERVER_URL)) {
+    http.addHeader("Content-Type", "application/json");
+
+    char json[256];
+    snprintf(json, sizeof(json),
+      "{\"light\":%s,\"fan\":%s,\"brightness\":%d,"
+      "\"timer_index\":%d,\"timer_label\":\"%s\","
+      "\"invert\":%s,\"uptime_sec\":%lu,\"wifi_rssi\":%d}",
+      lightOn ? "true" : "false",
+      fanOn ? "true" : "false",
+      brightness,
+      timerIndex,
+      timerLabels[timerIndex],
+      invertDisplay ? "true" : "false",
+      millis() / 1000,
+      WiFi.RSSI()
+    );
+
+    http.POST(json);
+    http.end();
+    saveStateSnapshot();
+    lastSyncTime = millis();
+  }
+}
 
 // --- Drawing helpers ---
 
@@ -220,6 +293,9 @@ void drawMainMenu() {
   u8g2.setFont(u8g2_font_ncenB08_tr);
   if (lightOn) u8g2.drawDisc(4, 6, 2);
   if (fanOn) u8g2.drawDisc(12, 6, 2);
+  // WiFi indicator in top-right
+  if (WiFi.status() == WL_CONNECTED) u8g2.drawDisc(122, 6, 2);
+  else u8g2.drawCircle(122, 6, 2);
   drawList(mainItems, mainCount, cursor, 28);
 }
 
@@ -228,6 +304,14 @@ void drawHome() {
   drawStatusIcon(8, 32, "Light:", lightOn);
   drawStatusIcon(8, 48, "Fan:", fanOn);
   u8g2.setFont(u8g2_font_ncenB08_tr);
+  // WiFi status
+  if (WiFi.status() == WL_CONNECTED) {
+    char buf[20];
+    sprintf(buf, "WiFi: %ddBm", WiFi.RSSI());
+    u8g2.drawStr(68, 32, buf);
+  } else {
+    u8g2.drawStr(68, 32, "WiFi: --");
+  }
   char buf[20];
   unsigned long sec = millis() / 1000;
   sprintf(buf, "Up: %lum %lus", sec / 60, sec % 60);
@@ -262,7 +346,6 @@ void drawScreenTimer() {
   int w = u8g2.getStrWidth(timerLabels[timerIndex]);
   u8g2.drawStr((128 - w) / 2, 40, timerLabels[timerIndex]);
 
-  // draw left/right arrows
   u8g2.setFont(u8g2_font_ncenB08_tr);
   if (timerIndex > 0) u8g2.drawStr(4, 40, "<");
   if (timerIndex < timerCount - 1) u8g2.drawStr(120, 40, ">");
@@ -346,7 +429,6 @@ void handleScreenTimer() {
 void handleInvertColor() {
   if (btn[B_SEL] || btn[B_CTRL]) {
     invertDisplay = !invertDisplay;
-    // Send display invert command via u8x8/low-level
     u8g2.sendF("c", invertDisplay ? 0xA7 : 0xA6);
   }
   if (btn[B_BACK]) screen = SETTINGS;
@@ -356,7 +438,7 @@ void handleAbout() {
   if (btn[B_BACK] || btn[B_SEL]) screen = MAIN_MENU;
 }
 
-// Check if any input is active (for activity tracking)
+// Check if any input is active
 bool anyInputActive() {
   return btn[B_UP] || btn[B_DOWN] || btn[B_SEL] || btn[B_BACK] || btn[B_CTRL];
 }
@@ -370,6 +452,9 @@ void setup() {
   u8g2.begin();
   u8g2.setContrast(brightness);
   lastActivityTime = millis();
+
+  // Start WiFi connection (non-blocking)
+  wifiConnect();
 }
 
 void loop() {
@@ -379,10 +464,9 @@ void loop() {
   if (anyInputActive()) {
     lastActivityTime = millis();
     if (screenOff) {
-      // Wake up the screen
       screenOff = false;
       u8g2.setPowerSave(0);
-      return;  // consume the input that woke the screen
+      return;  // consume the wake input
     }
   }
 
@@ -394,7 +478,7 @@ void loop() {
     }
   }
 
-  if (screenOff) return;  // don't process input or draw while screen is off
+  if (screenOff) return;
 
   switch (screen) {
     case MAIN_MENU:  handleMainMenu(); break;
@@ -406,6 +490,20 @@ void loop() {
     case SET_TIMER:  handleScreenTimer(); break;
     case SET_INVERT: handleInvertColor(); break;
     case ABOUT:      handleAbout(); break;
+  }
+
+  // Send state to server on change or periodically
+  if (stateChanged() || millis() - lastSyncTime >= SYNC_INTERVAL) {
+    sendStateToServer();
+  }
+
+  // WiFi auto-reconnect
+  if (WiFi.status() != WL_CONNECTED) {
+    static unsigned long lastReconnect = 0;
+    if (millis() - lastReconnect > 10000) {
+      wifiConnect();
+      lastReconnect = millis();
+    }
   }
 
   u8g2.clearBuffer();
