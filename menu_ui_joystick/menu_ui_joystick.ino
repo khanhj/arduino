@@ -537,7 +537,8 @@ void loop() {
   if (stateChanged()) pendingSync = true;
   
   if (pendingSync && (millis() - lastActivityTime >= SYNC_DEBOUNCE_MS)) {
-    if (sendStateToServer()) pendingSync = false;
+    sendStateToServer();
+    pendingSync = false; // ALWAYS clear regardless of success to prevent UI freezing deadloops!
   } else if (!pendingSync && millis() - lastSyncTime >= SYNC_INTERVAL) {
     sendStateToServer();
   }
