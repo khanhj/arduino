@@ -120,7 +120,19 @@ bool lightOn = false;
 bool fanOn = false;
 int brightness = 255;
 
-enum Screen { MAIN_MENU, HOME, LIGHT, FAN, SETTINGS, SET_BRIGHT, ABOUT };
+// --- Screen auto-off timer ---
+// timerIndex: 0=Off, 1=10s, 2=30s, 3=1m, 4=5m
+int timerIndex = 0;
+const unsigned long timerValues[] = {0, 10000, 30000, 60000, 300000};
+const char *timerLabels[] = {"Off", "10s", "30s", "1 min", "5 min"};
+const int timerCount = 5;
+unsigned long lastActivityTime = 0;
+bool screenOff = false;
+
+// --- Invert display ---
+bool invertDisplay = false;
+
+enum Screen { MAIN_MENU, HOME, LIGHT, FAN, SETTINGS, SET_BRIGHT, SET_TIMER, SET_INVERT, ABOUT };
 Screen screen = MAIN_MENU;
 int cursor = 0;
 int setCursor = 0;
@@ -128,8 +140,8 @@ int setCursor = 0;
 // Menu items
 const char *mainItems[] = {"Home", "Light", "Fan", "Settings", "About"};
 const int mainCount = 5;
-const char *setItems[] = {"Brightness", "Back"};
-const int setCount = 2;
+const char *setItems[] = {"Brightness", "Screen Timer", "Invert Color", "Back"};
+const int setCount = 4;
 
 // --- Drawing helpers ---
 
@@ -244,6 +256,25 @@ void drawBrightness() {
   u8g2.drawStr(68, 64, "[Hold]Rst");
 }
 
+void drawScreenTimer() {
+  drawHeader("SCREEN TIMER");
+  u8g2.setFont(u8g2_font_ncenB14_tr);
+  int w = u8g2.getStrWidth(timerLabels[timerIndex]);
+  u8g2.drawStr((128 - w) / 2, 40, timerLabels[timerIndex]);
+
+  // draw left/right arrows
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  if (timerIndex > 0) u8g2.drawStr(4, 40, "<");
+  if (timerIndex < timerCount - 1) u8g2.drawStr(120, 40, ">");
+
+  u8g2.drawStr(0, 64, "[Joy]Adj");
+  u8g2.drawStr(78, 64, "[Back]<-");
+}
+
+void drawInvertColor() {
+  drawToggleScreen("INVERT COLOR", invertDisplay);
+}
+
 void drawAbout() {
   drawHeader("ABOUT");
   u8g2.setFont(u8g2_font_ncenB08_tr);
@@ -291,7 +322,9 @@ void handleSettings() {
   if (btn[B_DOWN]) setCursor = (setCursor + 1) % setCount;
   if (btn[B_SEL]) {
     if (setCursor == 0) screen = SET_BRIGHT;
-    if (setCursor == 1) screen = MAIN_MENU;
+    if (setCursor == 1) screen = SET_TIMER;
+    if (setCursor == 2) screen = SET_INVERT;
+    if (setCursor == 3) screen = MAIN_MENU;
   }
   if (btn[B_BACK]) screen = MAIN_MENU;
 }
@@ -304,8 +337,28 @@ void handleBrightness() {
   u8g2.setContrast(brightness);
 }
 
+void handleScreenTimer() {
+  if (btn[B_UP])   { timerIndex++; if (timerIndex >= timerCount) timerIndex = timerCount - 1; }
+  if (btn[B_DOWN]) { timerIndex--; if (timerIndex < 0) timerIndex = 0; }
+  if (btn[B_SEL] || btn[B_BACK]) screen = SETTINGS;
+}
+
+void handleInvertColor() {
+  if (btn[B_SEL] || btn[B_CTRL]) {
+    invertDisplay = !invertDisplay;
+    // Send display invert command via u8x8/low-level
+    u8g2.sendF("c", invertDisplay ? 0xA7 : 0xA6);
+  }
+  if (btn[B_BACK]) screen = SETTINGS;
+}
+
 void handleAbout() {
   if (btn[B_BACK] || btn[B_SEL]) screen = MAIN_MENU;
+}
+
+// Check if any input is active (for activity tracking)
+bool anyInputActive() {
+  return btn[B_UP] || btn[B_DOWN] || btn[B_SEL] || btn[B_BACK] || btn[B_CTRL];
 }
 
 void setup() {
@@ -316,10 +369,32 @@ void setup() {
   Wire.begin(D2, D1);
   u8g2.begin();
   u8g2.setContrast(brightness);
+  lastActivityTime = millis();
 }
 
 void loop() {
   readInputs();
+
+  // Track activity for screen timer
+  if (anyInputActive()) {
+    lastActivityTime = millis();
+    if (screenOff) {
+      // Wake up the screen
+      screenOff = false;
+      u8g2.setPowerSave(0);
+      return;  // consume the input that woke the screen
+    }
+  }
+
+  // Auto screen off on inactivity
+  if (!screenOff && timerValues[timerIndex] > 0) {
+    if (millis() - lastActivityTime >= timerValues[timerIndex]) {
+      screenOff = true;
+      u8g2.setPowerSave(1);
+    }
+  }
+
+  if (screenOff) return;  // don't process input or draw while screen is off
 
   switch (screen) {
     case MAIN_MENU:  handleMainMenu(); break;
@@ -328,6 +403,8 @@ void loop() {
     case FAN:        handleFan(); break;
     case SETTINGS:   handleSettings(); break;
     case SET_BRIGHT: handleBrightness(); break;
+    case SET_TIMER:  handleScreenTimer(); break;
+    case SET_INVERT: handleInvertColor(); break;
     case ABOUT:      handleAbout(); break;
   }
 
@@ -339,6 +416,8 @@ void loop() {
     case FAN:        drawFan(); break;
     case SETTINGS:   drawSettings(); break;
     case SET_BRIGHT: drawBrightness(); break;
+    case SET_TIMER:  drawScreenTimer(); break;
+    case SET_INVERT: drawInvertColor(); break;
     case ABOUT:      drawAbout(); break;
   }
   u8g2.sendBuffer();
