@@ -163,7 +163,6 @@ const unsigned long SYNC_INTERVAL = 60000;  // periodic sync every 60s (was 5s)
 
 // --- Debounced Sync ---
 bool pendingSync = false;
-unsigned long lastStateChangeTime = 0;
 const unsigned long SYNC_DEBOUNCE_MS = 1000;  // wait 1s after last input
 
 
@@ -544,11 +543,10 @@ void loop() {
   // Flag for debounced sync if state changed
   if (stateChanged()) {
     pendingSync = true;
-    lastStateChangeTime = millis();
   }
 
   // Send state to server only after no inputs for 1 second, or periodically every 60s
-  if (pendingSync && (millis() - lastStateChangeTime >= SYNC_DEBOUNCE_MS)) {
+  if (pendingSync && (millis() - lastActivityTime >= SYNC_DEBOUNCE_MS)) {
     sendStateToServer();
     pendingSync = false;
     lastSyncTime = millis();
