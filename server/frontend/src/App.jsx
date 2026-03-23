@@ -29,6 +29,16 @@ function useWebSocket(url) {
   }, [url])
 
   useEffect(() => {
+    // Fetch initial state via HTTP to reflect status immediately
+    fetch('/api/state')
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.last_update) {
+          setState(data)
+        }
+      })
+      .catch(console.error)
+
     connect()
     return () => {
       clearTimeout(reconnectTimer.current)
