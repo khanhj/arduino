@@ -160,9 +160,14 @@ bool prevInvertDisplay = false;
 
 // --- Network Sync ---
 unsigned long lastSyncTime = 0;
-const unsigned long SYNC_INTERVAL = 60000;  // 60s periodic sync
+const unsigned long SYNC_INTERVAL = 15000;  // 15s to keep TLS connection alive
 bool pendingSync = false;
 const unsigned long SYNC_DEBOUNCE_MS = 1000;
+
+// Persistent connection to skip slow TLS handshakes
+WiFiClientSecure secureClient;
+HTTPClient http;
+bool httpInitialized = false;
 
 enum Screen { MAIN_MENU, HOME, LIGHT, FAN, SETTINGS, SET_BRIGHT, SET_TIMER, SET_INVERT, ABOUT };
 Screen screen = MAIN_MENU;
@@ -217,16 +222,22 @@ void saveStateSnapshot() {
 bool sendStateToServer() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setBufferSizes(512, 512); // Save memory
-  HTTPClient http;
-  http.setTimeout(8000);
+  // Indicate freezing to the user
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.drawStr(100, 62, "Sync");
+  u8g2.sendBuffer();
 
-  if (http.begin(client, SERVER_URL)) {
+  if (!httpInitialized) {
+    secureClient.setInsecure();
+    secureClient.setBufferSizes(512, 512); // Save memory
+    http.setReuse(true); // Keep-Alive to bypass slow 5-sec TLS handshakes!
+    http.setTimeout(8000);
+    http.begin(secureClient, SERVER_URL);
     http.addHeader("Content-Type", "application/json");
+    httpInitialized = true;
+  }
 
-    char json[256];
+  char json[256];
     snprintf(json, sizeof(json),
       "{\"light\":%s,\"fan\":%s,\"brightness\":%d,"
       "\"timer_index\":%d,\"timer_label\":\"%s\","
@@ -242,16 +253,18 @@ bool sendStateToServer() {
     );
 
     int res = http.POST(json);
-    http.end();
-    
+  
+  if (res > 0) {
+    saveStateSnapshot();
     lastSyncTime = millis();
-    if (res > 0) {
-      saveStateSnapshot();
-      return true;
-    }
+    return true;
+  } else {
+    // If Keep-Alive dropped violently, reset HTTP connection
+    http.end();
+    httpInitialized = false;
+    lastSyncTime = millis();
     return false;
   }
-  return false;
 }
 
 // --- Drawing helpers ---
